@@ -43,6 +43,7 @@ macOS 需要系统的 Xcode Command Line Tools：
 ```bash
 bash macos/test.sh
 bash macos/build.sh
+bash macos/verify.sh
 bash macos/install.sh
 ```
 

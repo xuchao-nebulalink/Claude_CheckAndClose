@@ -40,11 +40,7 @@ jobs:
       - name: Build Universal applications
         run: bash macos/build.sh
       - name: Verify signatures, architectures and read-only status
-        run: |
-          lipo macos/build/ClaudeControl -verify_arch arm64 x86_64
-          codesign --verify --deep --strict 'macos/build/一键关闭 Claude.app'
-          codesign --verify --deep --strict 'macos/build/检查 Claude 进程.app'
-          macos/build/ClaudeControl --status
+        run: bash macos/verify.sh
       - name: Package apps
         if: matrix.package
         run: bash macos/package.sh
