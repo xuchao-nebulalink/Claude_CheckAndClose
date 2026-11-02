@@ -40,10 +40,28 @@ internal static class Tests
         const string script = @"C:\Program Files\nodejs\node_modules\@anthropic-ai\claude-code\cli.js";
         foreach (string[] argv in new[] { new[] { "node.exe", script }, ["node.exe", "--enable-source-maps", script], ["node.exe", "--require", "module", script], ["node.exe", "--", script], ["node.exe", "node_modules/@anthropic-ai/claude-code/cli.js"] })
             Assert(ProcessRules.RootKind(P(10, 1, @"C:\node.exe", argv)) is not null, "detect true Node script entry");
+        foreach (string[] argv in new[] { new[] { "node.exe", "--trace-uncaught", script }, ["node.exe", "--abort-on-uncaught-exception", script], ["node.exe", "--expose-gc", script], ["node.exe", "--unhandled-rejections", "strict", script], ["node.exe", "--dns-result-order", "ipv4first", script], ["node.exe", "--title=claude-task", "--inspect=127.0.0.1:0", script] })
+            Assert(ProcessRules.RootKind(P(10, 1, @"C:\node.exe", argv)) is not null, "detect supported Node flags before true entry");
         foreach (string[] argv in new[] { new[] { "node.exe", "other.js", script }, ["node.exe", "-e", script], ["node.exe", "-econsole.log(1)", script], ["node.exe", "-p1+1", script], ["node.exe", "-rmodule", script], ["node.exe", "--title", script, "other.js"], ["node.exe", "--unknown-value-option", script, "other.js"], ["node.exe", "--eval=" + script], ["node.exe", "--require", script, "other.js"], ["node.exe", "--", "other.js", script], ["node.exe", "https://claude.ai"], ["node.exe", script + ".bak"] })
             Assert(ProcessRules.RootKind(P(10, 1, @"C:\node.exe", argv)) is null, "exclude script text in data");
         Assert(ProcessRules.RootKind(P(10, 1, @"C:\cmd.exe", ["cmd", script])) is null, "exclude non-runtime script-like args");
         Assert(ProcessRules.RootKind(P(10, 1, @"C:\bun.exe", ["bun", script])) is not null, "detect Bun");
+        Assert(ProcessRules.RootKind(P(10, 1, @"C:\bun.exe", ["bun", "run", script])) is not null, "Bun run absolute source entry");
+        Assert(ProcessRules.RootKind(P(10, 1, @"C:\bun.exe", ["bun", "run", @".\node_modules\@anthropic-ai\claude-code\cli.js"])) is not null, "Bun run explicit relative source entry");
+        var bunAmbiguous = P(10, 1, @"C:\bun.exe", ["bun", "run", @"node_modules\@anthropic-ai\claude-code\cli.js"]);
+        Assert(ProcessRules.RootKind(bunAmbiguous) is null && ProcessRules.RootWarning(bunAmbiguous) is not null, "Bun run unprefixed name could be package script and is not authorized");
+        Assert(ProcessRules.RootKind(P(10, 1, @"C:\bun.exe", ["bun", "run", "dev", script])) is null, "Bun package-script tail data is not a source entry");
+        foreach (string[] argv in new[] { new[] { "node.exe", "--run=serve", script }, ["node.exe", "--run", "serve", script], ["node.exe", "--eval=code", script] })
+        {
+            var process = P(10, 1, @"C:\node.exe", argv);
+            Assert(ProcessRules.RootKind(process) is null && ProcessRules.RootWarning(process) is null, "explicit non-entry mode is neither target nor uncertain script");
+        }
+        foreach (string option in new[] { "--unknown-value-option", "--unknown=value", "-rmodule" })
+        {
+            var process = P(10, 1, @"C:\node.exe", ["node", option, script]);
+            Assert(ProcessRules.RootKind(process) is null && ProcessRules.RootWarning(process) is not null, "unknown options with exact script clue warn without authorizing close");
+            Assert(ProcessRules.RootWarning(P(10, 1, @"C:\node.exe", ["node", option, "unrelated.js"])) is null, "unknown ordinary Node process does not produce Claude warning");
+        }
         Assert(ProcessRules.Under(@"C:\Claude\a.exe", @"C:\Claude"), "directory boundary positive");
         Assert(!ProcessRules.Under(@"C:\Claude-other\a.exe", @"C:\Claude"), "directory boundary negative");
     }
@@ -90,6 +108,19 @@ internal static class Tests
         Assert(!ProcessRules.CanEstablishAncestors(new Dictionary<int, ProcessRecord> { [90] = P(90, 15, "tool") }, new Dictionary<int, int> { [90] = 15, [15] = 10, [10] = 1 }, 90), "unreadable live intermediate ancestor is unsafe");
         Assert(ProcessRules.CanEstablishAncestors(new Dictionary<int, ProcessRecord> { [90] = P(90, 15, "tool") }, new Dictionary<int, int> { [90] = 15 }, 90), "already-exited parent ends observable live chain");
         Assert(!ProcessRules.CanEstablishAncestors(new Dictionary<int, ProcessRecord>(), new Dictionary<int, int>(), 90), "missing self cannot establish safe ancestry");
+        var lateParent = root with { Created = 2000 };
+        var olderSelf = P(90, 10, @"C:\ClaudeControl.exe", created: 1000);
+        var reusedAncestors = new Dictionary<int, ProcessRecord> { [90] = olderSelf, [10] = lateParent };
+        Assert(!ProcessRules.CanEstablishAncestors(reusedAncestors, new Dictionary<int, int> { [90] = 10, [10] = 1 }, 90), "reused newer parent PID cannot claim safe ancestry");
+        Assert(!ProcessRules.Protected(reusedAncestors, 90).Contains(10), "newer unrelated parent PID is not labeled an actual ancestor");
+        Assert(!ProcessRules.CanEstablishAncestors(new Dictionary<int, ProcessRecord> { [90] = olderSelf }, new Dictionary<int, int> { [90] = 10 }, 90, new HashSet<int> { 10 }), "tracked unreadable ancestor remains unsafe even if WMI omitted its row");
+
+        targets.Clear();
+        ProcessRules.Expand(S(root, child), targets, 90, Sid, 1);
+        ProcessRules.Expand(new Snapshot(new Dictionary<int, ProcessRecord>(), ["child unreadable"], true, new HashSet<int> { child.Id }), targets, 90, Sid, 1);
+        Assert(targets.Count == 1 && targets[child.Id].SameIdentity(child), "temporary unreadability retains previously captured child identity");
+        ProcessRules.Expand(S(child with { ParentId = 1 }, grandchild), targets, 90, Sid, 1);
+        Assert(targets.Count == 2 && targets.ContainsKey(grandchild.Id), "recovered orphan child is rechecked and can identify its new descendants");
     }
 
     private static void Flow()
@@ -116,6 +147,11 @@ internal static class Tests
         var reused = new FakeSystem(S(root)) { ReplaceBeforeKill = true };
         close = new Controller(reused).Close();
         Assert(reused.Killed.Count == 0, "backend identity guard refuses replacement PID");
+        var recovery = new RecoveringSystem(root, child);
+        close = new Controller(recovery).Close();
+        Assert(recovery.Killed.SequenceEqual([child.Id]), "full close flow retries only the captured child after transient read denial");
+        Assert(recovery.ReceivedTrackedAfterFailure, "captured uncertain identity is supplied to the next native refresh");
+        Assert(close.Remaining.Count == 0 && close.Warnings.Count > 0, "transient failure remains reported even after retry succeeds");
     }
 
     private static void NativeIntegration()
@@ -158,6 +194,25 @@ internal static class Tests
                 }
                 finally { if (!owned.HasExited) { owned.Kill(); owned.WaitForExit(); } }
             }
+            // Verify ambiguous runtime options reach the real capture warning path,
+            // rather than silently producing a complete zero-process result.
+            var ambiguousStart = new ProcessStartInfo(Path.Combine(directory, "node.exe")) { UseShellExecute = false, CreateNoWindow = true };
+            ambiguousStart.ArgumentList.Add("--claude-control-unknown=1");
+            ambiguousStart.ArgumentList.Add(@"C:\fixture path\node_modules\@anthropic-ai\claude-code\cli.js");
+            ambiguousStart.ArgumentList.Add("--fixture");
+            using Process ambiguousOwned = Process.Start(ambiguousStart) ?? throw new Exception("cannot start ambiguous owned fixture");
+            try
+            {
+                Thread.Sleep(250);
+                Assert(!ambiguousOwned.HasExited, "ambiguous owned fixture reaches sleep branch");
+                var system = new WindowsProcessSystem();
+                ProcessRecord identity = system.Read(ambiguousOwned.Id, Environment.ProcessId, out int error) ?? throw new Exception("cannot read ambiguous fixture: " + error);
+                Snapshot snapshot = system.Capture();
+                Assert(ProcessRules.RootKind(snapshot.Processes[ambiguousOwned.Id]) is null, "unknown runtime option never authorizes native fixture close");
+                Assert(snapshot.Warnings.Any(warning => warning.Contains($"PID {ambiguousOwned.Id}")), "native capture reports uncertain script entry");
+                Assert(system.Terminate(identity) is null && ambiguousOwned.WaitForExit(5000), "clean up only ambiguous owned fixture");
+            }
+            finally { if (!ambiguousOwned.HasExited) { ambiguousOwned.Kill(); ambiguousOwned.WaitForExit(); } }
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -184,7 +239,35 @@ internal static class Tests
             var values = state.Processes.ToDictionary(p => p.Key, p => p.Value);
             if (ReplaceBeforeKill && values.TryGetValue(expected.Id, out var replaced)) values[expected.Id] = replaced with { Created = replaced.Created + 1, ImagePath = @"C:\unrelated.exe" };
             if (values.TryGetValue(expected.Id, out var current) && expected.SameIdentity(current)) { values.Remove(expected.Id); Killed.Add(expected.Id); }
-            state = new(values, state.Warnings);
+            state = new(values, state.Warnings, state.ProtectionComplete, state.UncertainIds);
+            return null;
+        }
+        public void Delay(TimeSpan duration) { }
+    }
+
+    private sealed class RecoveringSystem(ProcessRecord root, ProcessRecord child) : IProcessSystem
+    {
+        private int capture;
+        private bool readable;
+        public int CurrentId => 90;
+        public string CurrentSid => Sid;
+        public int CurrentSession => 1;
+        public List<int> Killed { get; } = [];
+        public bool ReceivedTrackedAfterFailure { get; private set; }
+        public Snapshot Capture(IReadOnlyCollection<ProcessRecord>? tracked = null)
+        {
+            int current = capture++;
+            if (current == 0) return S(root, child);
+            if (current == 1) return new(new Dictionary<int, ProcessRecord>(), ["owned child temporarily unreadable"], true, new HashSet<int> { child.Id });
+            ReceivedTrackedAfterFailure |= tracked?.Any(p => p.SameIdentity(child)) == true;
+            readable = true;
+            return Killed.Count == 0 ? S(child with { ParentId = 1 }) : S();
+        }
+        public string? RequestClose(ProcessRecord expected) => null;
+        public string? Terminate(ProcessRecord expected)
+        {
+            if (!readable) return "owned child temporarily unreadable";
+            if (expected.SameIdentity(child)) Killed.Add(expected.Id);
             return null;
         }
         public void Delay(TimeSpan duration) { }

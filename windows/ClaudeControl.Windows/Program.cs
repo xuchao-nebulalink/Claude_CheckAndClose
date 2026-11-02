@@ -92,7 +92,7 @@ internal sealed class MainForm : Form
             foreach (var process in result.Remaining)
                 text.AppendLine($"PID {process.Id} · {process.Kind}\r\n{process.ImagePath}\r\n");
             foreach (string warning in result.Warnings) text.AppendLine(warning + "\r\n");
-            if (text.Length == 0) text.Append("本次检查范围：当前用户、当前 Windows 登录会话中的本地 Claude 和 Claude Code。\r\n\r\n结果表示复查时的状态；本工具不阻止软件之后重新启动，也不提供网络隔离。");
+            if (text.Length == 0) text.Append("本次检查范围：当前用户、当前 Windows 登录会话中的本地 Claude 和 Claude Code。\r\n不包含 Cowork 虚拟机及系统级后台服务。\r\n\r\n结果表示复查时的状态；本工具不阻止软件之后重新启动，也不提供网络隔离。");
             details.Text = text.ToString();
         }
         catch (Exception exception)

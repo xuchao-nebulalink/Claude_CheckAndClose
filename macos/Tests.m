@@ -64,7 +64,7 @@ static void TestMatching(void) {
         @[@"node", @"--require", @"module", script],
         @[@"node", @"--import", @"module", @"--", script],
         @[@"node", @"--require=module", script],
-        @[@"node", @"--unknown-value=explicit", script],
+        @[@"node", @"--max-old-space-size=64", script],
         @[@"node", @"--title", @"claude-code", script]
     ];
     for (NSArray *arguments in positiveArguments) {
@@ -125,6 +125,19 @@ static void TestScriptSymlinks(void) {
     NSString *broken = [bin stringByAppendingPathComponent:@"missing"];
     [manager createSymbolicLinkAtPath:broken withDestinationPath:@"../missing.js" error:NULL];
     T(!CCClaudeScript(broken), @"Broken unrelated symlink is rejected");
+    NSString *npmBin = [root stringByAppendingPathComponent:@"node_modules/.bin"];
+    [manager createDirectoryAtPath:npmBin withIntermediateDirectories:YES attributes:nil error:NULL];
+    [manager createSymbolicLinkAtPath:[npmBin stringByAppendingPathComponent:@"claude"] withDestinationPath:@"../@anthropic-ai/claude-code/cli.js" error:NULL];
+    CCProcess *relative = Fixture(200003, 1, @"/usr/local/bin/node", @[@"node", @"./node_modules/.bin/claude"]);
+    NSMutableArray *relativeWarnings = [NSMutableArray array];
+    T(CCRootReasonWithWarnings(relative, relativeWarnings) == nil && relativeWarnings.count == 1,
+      @"A relative npm alias is only an incomplete-coverage clue and cannot authorize termination");
+    NSString *savedDirectory = manager.currentDirectoryPath;
+    BOOL changedDirectory = [manager changeCurrentDirectoryPath:root];
+    relativeWarnings = [NSMutableArray array];
+    T(changedDirectory && CCRootReasonWithWarnings(relative, relativeWarnings) == nil && relativeWarnings.count == 1,
+      @"A valid alias in the current directory still cannot establish the process startup directory");
+    [manager changeCurrentDirectoryPath:savedDirectory];
     [manager removeItemAtPath:root error:NULL];
 }
 
@@ -208,6 +221,16 @@ static void TestCoverage(void) {
     T(self && realWarnings.count == 0, @"Own process metadata is readable without a spurious warning");
     CCReadProcessWithWarnings(999999, NO, realWarnings);
     T(realWarnings.count == 0, @"An already-exited process does not create a permission warning");
+    NSMutableArray *exitWarnings = [NSMutableArray array];
+    CCReadWarning(getpid(), @"模拟原始读取", ESRCH, exitWarnings);
+    T(exitWarnings.count == 0,
+      @"An original ESRCH remains a normal exit even when the PID is readable during diagnostic recheck");
+    for (NSNumber *code in @[@(EPERM), @(EACCES), @(EIO), @(ENOENT)]) {
+        NSMutableArray *failureWarnings = [NSMutableArray array];
+        CCReadWarning(getpid(), @"模拟原始读取", code.intValue, failureWarnings);
+        T(failureWarnings.count == 1,
+          [NSString stringWithFormat:@"A live PID read error %d remains an incomplete-coverage warning", code.intValue]);
+    }
     NSSet *protected = CCProtected(@{@(getpid()): self});
     T([protected containsObject:@(getpid())], @"Ancestry fallback protects self when snapshot ancestors are absent");
     CCProcess *brokenAncestor = Fixture(getpid(), 999999, @"/tmp/tool", nil);
@@ -215,6 +238,124 @@ static void TestCoverage(void) {
     NSSet *failClosed = CCProtectedWithWarnings(@{@(getpid()):brokenAncestor}, ancestryWarnings);
     T(ancestryWarnings.count == 1 && CCIsProtected(failClosed, 123456),
       @"Unknown ancestry protects even captured targets absent from the snapshot");
+    CCProcess *retained = Fixture(1, 0, @"/previously-captured", nil);
+    NSMutableDictionary *retainedTargets = [@{@1: retained} mutableCopy];
+    CCTestUnreadablePID = 1;
+    CCExpandWithWarnings(@{@(getpid()):brokenAncestor}, retainedTargets, ancestryWarnings);
+    CCTestUnreadablePID = -1;
+    T(retainedTargets[@1] == retained && retained.protectedFromTermination,
+      @"A retained target whose identity cannot be read still receives the current protect-all decision");
+}
+
+static void TestParentBirthOrdering(void) {
+    CCProcess *root = Fixture(200001, 1, @"/Applications/Claude.app/Contents/MacOS/Claude", nil);
+    CCProcess *oldChild = Fixture(200002, root.pid, @"/usr/bin/python3", nil);
+    root.seconds = 200;
+    root.microseconds = 500;
+    oldChild.seconds = 100;
+    oldChild.microseconds = 999999;
+    NSMutableDictionary *targets = [NSMutableDictionary dictionary];
+    CCExpand(@{@(root.pid):root, @(oldChild.pid):oldChild}, targets);
+    T(targets.count == 1 && targets[@(oldChild.pid)] == nil,
+      @"A reused parent PID cannot adopt a child born in an earlier second");
+    oldChild.seconds = root.seconds;
+    oldChild.microseconds = root.microseconds - 1;
+    targets = [NSMutableDictionary dictionary];
+    CCExpand(@{@(root.pid):root, @(oldChild.pid):oldChild}, targets);
+    T(targets.count == 1 && targets[@(oldChild.pid)] == nil,
+      @"A reused parent PID cannot adopt a child born earlier within the same second");
+    oldChild.microseconds = root.microseconds;
+    T(CCBornNotBefore(oldChild, root), @"Equal microsecond timestamps permit a possible genuine child");
+    targets = [NSMutableDictionary dictionary];
+    CCExpand(@{@(root.pid):root, @(oldChild.pid):oldChild}, targets);
+    T(targets.count == 2, @"A child with the same recorded birth timestamp may be expanded");
+    oldChild.seconds = root.seconds + 1;
+    oldChild.microseconds = 0;
+    root.microseconds = 999999;
+    T(CCBornNotBefore(oldChild, root), @"Seconds take precedence over microseconds across a second boundary");
+    oldChild.seconds = 0;
+    T(!CCBornNotBefore(oldChild, root), @"Unknown child birth time cannot authorize descendant expansion");
+    oldChild.seconds = 201;
+    root.seconds = 0;
+    T(!CCBornNotBefore(oldChild, root), @"Unknown parent birth time cannot authorize descendant expansion");
+    root.seconds = 200;
+    root.microseconds = 1000000;
+    T(!CCBornNotBefore(oldChild, root), @"Invalid birth microseconds cannot authorize descendant expansion");
+}
+
+static void TestNodeIdentificationCoverage(void) {
+    NSString *entry = @"/fixture/node_modules/@anthropic-ai/claude-code/cli.js";
+    NSArray<NSArray<NSString *> *> *known = @[
+        @[@"node", @"--trace-uncaught", entry],
+        @[@"node", @"--abort-on-uncaught-exception", entry],
+        @[@"node", @"--unhandled-rejections", @"strict", entry],
+        @[@"node", @"--dns-result-order", @"ipv4first", entry],
+        @[@"node", @"--unhandled-rejections=strict", entry],
+        @[@"node", @"--max-old-space-size=64", entry]
+    ];
+    for (NSArray *arguments in known) {
+        NSMutableArray *warnings = [NSMutableArray array];
+        CCProcess *process = Fixture(200003, 1, @"/usr/local/bin/node", arguments);
+        T(CCRootReasonWithWarnings(process, warnings) != nil && warnings.count == 0,
+          [@"Known Node options identify the entry without warnings: " stringByAppendingString:arguments.description]);
+    }
+    for (NSArray *arguments in @[@[@"node", @"--unknown", entry], @[@"node", @"--unknown-mode=expression", entry]]) {
+        CCProcess *process = Fixture(200003, 1, @"/usr/local/bin/node", arguments);
+        NSMutableArray *warnings = [NSMutableArray array];
+        NSMutableDictionary *targets = [NSMutableDictionary dictionary];
+        CCExpandWithWarnings(@{@(process.pid): process}, targets, warnings);
+        NSDictionary *result = CCResult(targets.allValues, 0, @[], warnings);
+        T(targets.count == 0 && warnings.count == 1 && ![result[@"scan_complete"] boolValue] && ![result[@"success"] boolValue],
+          @"Unknown Node modes with an exact script clue warn instead of matching or claiming complete zero");
+        CCExpandWithWarnings(@{@(process.pid): process}, targets, warnings);
+        T(warnings.count == 1, @"Refresh keeps an uncertain Node warning without duplicating it");
+    }
+    NSArray *excluded = @[
+        @[@"node", @"--unknown", @"unrelated.js"],
+        @[@"node", @"--unknown-mode=expression", @"unrelated.js"],
+        @[@"node", [@"--unknown-value=" stringByAppendingString:entry], @"unrelated.js"],
+        @[@"node", @"--eval", entry],
+        @[@"node", @"-econsole.log(1)", entry],
+        @[@"node", @"--print", entry],
+        @[@"node", @"--run", @"package-script", entry],
+        @[@"node", @"--run=package-script", entry],
+        @[@"node", @"unrelated.js", entry]
+    ];
+    for (NSArray *arguments in excluded) {
+        NSMutableArray *warnings = [NSMutableArray array];
+        CCProcess *process = Fixture(200003, 1, @"/usr/local/bin/node", arguments);
+        T(CCRootReasonWithWarnings(process, warnings) == nil && warnings.count == 0,
+          [@"Unrelated or explicit non-entry modes neither match nor warn: " stringByAppendingString:arguments.description]);
+    }
+    NSMutableArray *warnings = [NSMutableArray array];
+    CCProcess *preload = Fixture(200003, 1, @"/usr/local/bin/node", @[@"node", @"--require", entry]);
+    T(CCRootReasonWithWarnings(preload, warnings) == nil && warnings.count == 1,
+      @"A CLI preload without a direct script is reported as uncertain instead of authorizing termination");
+    CCProcess *bun = Fixture(200003, 1, @"/usr/local/bin/bun", @[@"bun", @"run", entry]);
+    T(CCRootReason(bun) != nil, @"Bun run with a direct Claude script entry is recognized");
+    bun.arguments = @[@"bun", @"run", @"./node_modules/@anthropic-ai/claude-code/cli.js"];
+    T(CCRootReason(bun) != nil, @"Bun run recognizes an explicit ./ file entry");
+    for (NSString *ambiguous in @[@"node_modules/@anthropic-ai/claude-code/cli.js", @"../node_modules/@anthropic-ai/claude-code/cli.js"]) {
+        bun.arguments = @[@"bun", @"run", ambiguous];
+        warnings = [NSMutableArray array];
+        T(CCRootReasonWithWarnings(bun, warnings) == nil && warnings.count == 1,
+          @"Ambiguous Bun package-script names only warn and cannot authorize termination");
+    }
+    for (NSString *title in @[@"claude", @"claude-code"]) {
+        CCProcess *titled = Fixture(200003, 1, @"/usr/local/bin/node", @[title, @"", @""]);
+        warnings = [NSMutableArray array];
+        T(CCRootReasonWithWarnings(titled, warnings) == nil && warnings.count == 1,
+          @"An overwritten Claude runtime title is only an incomplete-coverage clue");
+        NSMutableDictionary *targets = [NSMutableDictionary dictionary];
+        CCExpandWithWarnings(@{@(titled.pid): titled}, targets, warnings);
+        NSDictionary *result = CCResult(targets.allValues, 0, @[], warnings);
+        T(targets.count == 0 && ![result[@"scan_complete"] boolValue],
+          @"A mutable runtime title cannot authorize termination or a complete-zero result");
+    }
+    warnings = [NSMutableArray array];
+    CCProcess *ordinary = Fixture(200003, 1, @"/usr/local/bin/node", @[@"worker", @"", @""]);
+    T(CCRootReasonWithWarnings(ordinary, warnings) == nil && warnings.count == 0,
+      @"Ordinary runtime titles and empty parameters do not create global warnings");
 }
 
 static void TestOwnedProcess(void) {
@@ -316,6 +457,45 @@ static void TestOwnedProcess(void) {
             T(waitpid(runtimeChild, &runtimeStatus, 0) == runtimeChild, @"Reaps owned runtime fixture");
             T(WIFSIGNALED(runtimeStatus) && WTERMSIG(runtimeStatus) == SIGTERM, @"Owned runtime fixture terminates with TERM");
         }
+
+        NSString *package = [root stringByAppendingPathComponent:@"node_modules/@anthropic-ai/claude-code"];
+        NSString *bin = [root stringByAppendingPathComponent:@"node_modules/.bin"];
+        [NSFileManager.defaultManager createDirectoryAtPath:package withIntermediateDirectories:YES attributes:nil error:NULL];
+        [NSFileManager.defaultManager createDirectoryAtPath:bin withIntermediateDirectories:YES attributes:nil error:NULL];
+        [@"// fixture\n" writeToFile:[package stringByAppendingPathComponent:@"cli.js"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [NSFileManager.defaultManager createSymbolicLinkAtPath:[bin stringByAppendingPathComponent:@"claude"] withDestinationPath:@"../@anthropic-ai/claude-code/cli.js" error:NULL];
+        const char *relativeEntry = "./node_modules/.bin/claude";
+        pid_t relativeChild = fork();
+        if (relativeChild == 0) {
+            if (chdir(root.fileSystemRepresentation) != 0) _exit(126);
+            execl(runtime.fileSystemRepresentation, runtime.fileSystemRepresentation, relativeEntry, (char *)NULL);
+            _exit(127);
+        }
+        T(relativeChild > 0, @"Starts only the owned relative npm alias fixture");
+        if (relativeChild > 0) {
+            CCProcess *identity = nil;
+            NSMutableArray *warnings = [NSMutableArray array];
+            for (NSUInteger i = 0; i < 100; i++) {
+                CCProcess *candidate = CCReadProcessWithWarnings(relativeChild, YES, warnings);
+                if ([candidate.path.lastPathComponent isEqualToString:@"node"] &&
+                    [candidate.arguments.lastObject isEqualToString:@(relativeEntry)]) { identity = candidate; break; }
+                usleep(10000);
+            }
+            T(identity != nil, @"Reads the owned runtime fixture actual relative npm alias argument");
+            T(CCRootReasonWithWarnings(identity, warnings) == nil && warnings.count == 1,
+              @"A real relative npm alias only warns even when its current directory contains a valid CLI symlink");
+            if (identity && CCSame(identity, CCReadProcess(relativeChild, NO))) {
+                T(kill(relativeChild, SIGTERM) == 0, @"Signals only the verified owned relative-alias fixture");
+            } else {
+                // This remains our unreaped child; its PID cannot be reused.
+                kill(relativeChild, SIGTERM);
+            }
+            int relativeStatus = 0;
+            T(waitpid(relativeChild, &relativeStatus, 0) == relativeChild,
+              @"Reaps only the owned relative-alias fixture");
+            T(WIFSIGNALED(relativeStatus) && WTERMSIG(relativeStatus) == SIGTERM,
+              @"Owned relative-alias fixture exits with TERM");
+        }
     }
     [NSFileManager.defaultManager removeItemAtPath:root error:NULL];
 }
@@ -327,6 +507,8 @@ int main(void) {
         TestIdentity();
         TestDescendants();
         TestCoverage();
+        TestParentBirthOrdering();
+        TestNodeIdentificationCoverage();
         TestOwnedProcess();
         printf("%lu checks, %lu failures\n", (unsigned long)checks, (unsigned long)failures);
     }

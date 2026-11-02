@@ -19,6 +19,12 @@
 @implementation CCProcess
 @end
 
+static BOOL CCRelativeClaudeAlias(NSString *script) {
+    if (script.isAbsolutePath) return NO;
+    return [script isEqualToString:@"claude"] || [script isEqualToString:@"./claude"] ||
+        [script isEqualToString:@"node_modules/.bin/claude"] || [script hasSuffix:@"/node_modules/.bin/claude"];
+}
+
 static BOOL CCUnder(NSString *path, NSString *directory) {
     return [path hasPrefix:[directory stringByAppendingString:@"/"]];
 }
@@ -30,8 +36,12 @@ static void CCWarning(NSMutableArray<NSString *> *warnings, NSString *warning) {
 
 static void CCReadWarning(pid_t pid, NSString *stage, int code, NSMutableArray *warnings) {
     if (!warnings) return;
+    // ESRCH describes the original read attempt, even if teardown metadata is
+    // briefly visible afterwards or this PID has already been reused.
+    if (code == ESRCH) return;
     // A normal exit or zombie during a snapshot is not a coverage failure.
     struct proc_bsdinfo check = {0};
+    errno = 0;
     if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &check, sizeof(check)) == sizeof(check)) {
         if (check.pbi_status == SZOMB || check.pbi_uid != getuid()) return;
     } else if (kill(pid, 0) < 0 && errno == ESRCH) return;
@@ -41,10 +51,12 @@ static void CCReadWarning(pid_t pid, NSString *stage, int code, NSMutableArray *
 static NSArray<NSString *> *CCArgumentsWithWarnings(pid_t pid, NSMutableArray *warnings) {
     int query[] = {CTL_KERN, KERN_PROCARGS2, pid};
     size_t length = 0;
+    errno = 0;
     if (sysctl(query, 3, NULL, &length, NULL, 0) != 0 || length <= sizeof(int)) {
         CCReadWarning(pid, @"脚本入口参数", errno, warnings); return @[];
     }
     NSMutableData *buffer = [NSMutableData dataWithLength:length];
+    errno = 0;
     if (sysctl(query, 3, buffer.mutableBytes, &length, NULL, 0) != 0 || length <= sizeof(int)) {
         CCReadWarning(pid, @"脚本入口参数", errno, warnings); return @[];
     }
@@ -66,15 +78,28 @@ static NSArray<NSString *> *CCArgumentsWithWarnings(pid_t pid, NSMutableArray *w
     return result;
 }
 
+#ifdef CC_TESTING
+static pid_t CCTestUnreadablePID = -1;
+#endif
+
 static CCProcess *CCReadProcessWithWarnings(pid_t pid, BOOL arguments, NSMutableArray *warnings) {
+#ifdef CC_TESTING
+    if (pid == CCTestUnreadablePID) return nil;
+#endif
     struct proc_bsdinfo info = {0};
+    errno = 0;
     if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
         CCReadWarning(pid, @"进程身份", errno, warnings); return nil;
     }
     if (info.pbi_uid != getuid() || info.pbi_status == SZOMB) return nil;
     char executable[PROC_PIDPATHINFO_MAXSIZE] = {0};
-    if (proc_pidpath(pid, executable, sizeof(executable)) <= 0)
-        CCReadWarning(pid, @"可执行文件路径", errno, warnings);
+    errno = 0;
+    int pathLength = proc_pidpath(pid, executable, sizeof(executable));
+    if (pathLength <= 0) {
+        int code = errno;
+        CCReadWarning(pid, @"可执行文件路径", code, warnings);
+        if (code == ESRCH) return nil;
+    }
     CCProcess *process = [CCProcess new];
     process.pid = pid;
     process.parent = info.pbi_ppid;
@@ -82,7 +107,7 @@ static CCProcess *CCReadProcessWithWarnings(pid_t pid, BOOL arguments, NSMutable
     process.seconds = info.pbi_start_tvsec;
     process.microseconds = info.pbi_start_tvusec;
     process.path = [[NSString alloc] initWithUTF8String:executable] ?: @"";
-    if (!process.path.length) CCReadWarning(pid, @"可执行文件路径", EIO, warnings);
+    if (pathLength > 0 && !process.path.length) CCReadWarning(pid, @"可执行文件路径编码", EIO, warnings);
     NSString *name = process.path.lastPathComponent.lowercaseString;
     BOOL runtime = [@[@"node", @"nodejs", @"bun"] containsObject:name];
     process.arguments = arguments && runtime ? CCArgumentsWithWarnings(pid, warnings) : @[];
@@ -90,6 +115,7 @@ static CCProcess *CCReadProcessWithWarnings(pid_t pid, BOOL arguments, NSMutable
     // Metadata, path and argv are separate kernel reads. Discard a PID that was
     // replaced while they were being read instead of mixing two identities.
     struct proc_bsdinfo after = {0};
+    errno = 0;
     if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after)) != sizeof(after)) {
         CCReadWarning(pid, @"复核进程身份", errno, warnings); return nil;
     }
@@ -139,6 +165,16 @@ static BOOL CCSame(CCProcess *first, CCProcess *second) {
         first.seconds == second.seconds && first.microseconds == second.microseconds;
 }
 
+static BOOL CCBornNotBefore(CCProcess *child, CCProcess *parent) {
+    // A snapshot is assembled from separate kernel reads. A recorded parent PID
+    // may already belong to a newer process when the parent is read; never let
+    // that replacement adopt a child that existed before it was created.
+    if (!child || !parent || child.seconds == 0 || parent.seconds == 0 ||
+        child.microseconds >= 1000000 || parent.microseconds >= 1000000) return NO;
+    return child.seconds > parent.seconds ||
+        (child.seconds == parent.seconds && child.microseconds >= parent.microseconds);
+}
+
 static BOOL CCClaudeScript(NSString *script) {
     NSString *entry = @"node_modules/@anthropic-ai/claude-code/cli.js";
     if ([script isEqualToString:entry] || [script hasSuffix:[@"/" stringByAppendingString:entry]]) return YES;
@@ -146,7 +182,29 @@ static BOOL CCClaudeScript(NSString *script) {
     return script.isAbsolutePath && [[script stringByResolvingSymlinksInPath] hasSuffix:[@"/" stringByAppendingString:entry]];
 }
 
-static NSString *CCRootReason(CCProcess *process) {
+static BOOL CCClaudeEntry(CCProcess *process, NSString *script, NSMutableArray *warnings) {
+    if (CCClaudeScript(script)) return YES;
+    if (!CCRelativeClaudeAlias(script)) return NO;
+    // Neither this tool's cwd nor the process's current cwd establishes the
+    // directory at exec time: the process may have changed it after startup.
+    CCWarning(warnings, [NSString stringWithFormat:@"PID %d：相对 Claude alias 无法确认启动时目录；未据此自动结束进程，检查不完整。", process.pid]);
+    return NO;
+}
+
+static BOOL CCClaudeRuntimeTitle(CCProcess *process) {
+    return [@[@"claude", @"claude-code"] containsObject:process.arguments.firstObject ?: @""];
+}
+
+static NSString *CCUncertainNode(CCProcess *process, NSMutableArray *warnings) {
+    BOOL clue = CCClaudeRuntimeTitle(process);
+    for (NSString *argument in process.arguments) {
+        if (![argument hasPrefix:@"-"] && (CCClaudeScript(argument) || CCRelativeClaudeAlias(argument))) { clue = YES; break; }
+    }
+    if (clue) CCWarning(warnings, [NSString stringWithFormat:@"PID %d：该 Node/Bun 启动方式或标题无法完整识别；未据此自动结束进程，检查不完整。", process.pid]);
+    return nil;
+}
+
+static NSString *CCRootReasonWithWarnings(CCProcess *process, NSMutableArray *warnings) {
     NSString *path = process.path;
     NSString *home = NSHomeDirectory();
     if (CCUnder(path, @"/Applications/Claude.app/Contents") ||
@@ -160,28 +218,45 @@ static NSString *CCRootReason(CCProcess *process) {
 
     NSString *name = path.lastPathComponent.lowercaseString;
     if (![@[@"node", @"nodejs", @"bun"] containsObject:name]) return nil;
-    NSSet *optionsWithValue = [NSSet setWithArray:@[@"-r", @"--require", @"--import", @"--loader", @"--experimental-loader", @"--conditions", @"-C", @"--icu-data-dir", @"--openssl-config", @"--title", @"--redirect-warnings", @"--trace-event-categories", @"--trace-event-file-pattern", @"--env-file", @"--env-file-if-exists", @"--watch-path", @"--cpu-prof-dir", @"--cpu-prof-name", @"--heap-prof-dir", @"--heap-prof-name", @"--snapshot-blob", @"--report-directory", @"--report-filename", @"--inspect-port"]];
-    NSSet *booleanOptions = [NSSet setWithArray:@[@"--enable-source-maps", @"--no-warnings", @"--trace-warnings", @"--trace-deprecation", @"--no-deprecation", @"--throw-deprecation", @"--pending-deprecation", @"--preserve-symlinks", @"--preserve-symlinks-main", @"--expose-gc", @"--experimental-vm-modules", @"--experimental-modules", @"--experimental-strip-types", @"--experimental-transform-types", @"--inspect", @"--inspect-brk", @"--cpu-prof", @"--heap-prof", @"--watch", @"--hot", @"--smol", @"--silent", @"--no-clear-screen"]];
-    for (NSUInteger i = 1; i < process.arguments.count; i++) {
+    NSSet *optionsWithValue = [NSSet setWithArray:@[@"-r", @"--require", @"--import", @"--loader", @"--experimental-loader", @"--conditions", @"-C", @"--icu-data-dir", @"--openssl-config", @"--title", @"--redirect-warnings", @"--trace-event-categories", @"--trace-event-file-pattern", @"--env-file", @"--env-file-if-exists", @"--watch-path", @"--cpu-prof-dir", @"--cpu-prof-name", @"--heap-prof-dir", @"--heap-prof-name", @"--snapshot-blob", @"--report-directory", @"--report-filename", @"--inspect-port", @"--unhandled-rejections", @"--dns-result-order"]];
+    NSSet *booleanOptions = [NSSet setWithArray:@[@"--enable-source-maps", @"--no-warnings", @"--trace-warnings", @"--trace-deprecation", @"--no-deprecation", @"--throw-deprecation", @"--pending-deprecation", @"--preserve-symlinks", @"--preserve-symlinks-main", @"--expose-gc", @"--experimental-vm-modules", @"--experimental-modules", @"--experimental-strip-types", @"--experimental-transform-types", @"--inspect", @"--inspect-brk", @"--cpu-prof", @"--heap-prof", @"--watch", @"--hot", @"--smol", @"--silent", @"--no-clear-screen", @"--trace-uncaught", @"--abort-on-uncaught-exception"]];
+    NSSet *inlineValueOptions = [NSSet setWithArray:@[@"--inspect", @"--inspect-brk", @"--max-old-space-size", @"--max-semi-space-size", @"--stack-size", @"--stack-trace-limit"]];
+    BOOL bunRun = [name isEqualToString:@"bun"] && process.arguments.count > 1 && [process.arguments[1] isEqualToString:@"run"];
+    for (NSUInteger i = bunRun ? 2 : 1; i < process.arguments.count; i++) {
         NSString *argument = process.arguments[i];
+        if (!argument.length) continue; // process.title may overwrite the original argv buffer.
         if ([argument hasPrefix:@"-e"] || [argument hasPrefix:@"-p"] ||
             [@[@"--eval", @"--print", @"--run", @"--test", @"--check", @"-c"] containsObject:argument] ||
             [argument hasPrefix:@"--eval="] || [argument hasPrefix:@"--print="] || [argument hasPrefix:@"--run="]) return nil;
         if ([argument isEqualToString:@"--"]) {
-            return i + 1 < process.arguments.count && CCClaudeScript(process.arguments[i + 1]) ? @"Claude Code（Node）" : nil;
+            if (i + 1 >= process.arguments.count) return CCUncertainNode(process, warnings);
+            NSString *entry = process.arguments[i + 1];
+            if (bunRun && !entry.isAbsolutePath && ![entry hasPrefix:@"./"]) return CCUncertainNode(process, warnings);
+            return CCClaudeEntry(process, entry, warnings) ? @"Claude Code（Node）" : nil;
         }
         if ([optionsWithValue containsObject:argument]) { i++; continue; }
         if ([argument hasPrefix:@"-"]) {
-            if ([booleanOptions containsObject:argument] ||
-                ([argument hasPrefix:@"--"] && [argument containsString:@"="]) ||
-                ([argument hasPrefix:@"-r"] && argument.length > 2)) continue;
+            if ([booleanOptions containsObject:argument] || ([argument hasPrefix:@"-r"] && argument.length > 2)) continue;
+            NSRange equals = [argument rangeOfString:@"="];
+            if ([argument hasPrefix:@"--"] && equals.location != NSNotFound) {
+                NSString *key = [argument substringToIndex:equals.location];
+                if ([optionsWithValue containsObject:key] || [inlineValueOptions containsObject:key]) continue;
+            }
             // An unknown option may consume the next argv entry. Guessing could
             // mistake an option value for the program being executed.
-            return nil;
+            return CCUncertainNode(process, warnings);
         }
-        return CCClaudeScript(argument) ? @"Claude Code（Node）" : nil;
+        // Bun's package-script lookup can take precedence for an unqualified
+        // relative name. Require an explicit file before authorizing a root.
+        if (bunRun && !argument.isAbsolutePath && ![argument hasPrefix:@"./"]) return CCUncertainNode(process, warnings);
+        if (CCClaudeEntry(process, argument, warnings)) return @"Claude Code（Node）";
+        return CCClaudeRuntimeTitle(process) ? CCUncertainNode(process, warnings) : nil;
     }
-    return nil;
+    return CCUncertainNode(process, warnings);
+}
+
+static NSString *CCRootReason(CCProcess *process) {
+    return CCRootReasonWithWarnings(process, nil);
 }
 
 static NSSet<NSNumber *> *CCProtectedWithWarnings(NSDictionary<NSNumber *, CCProcess *> *snapshot, NSMutableArray *warnings) {
@@ -220,6 +295,9 @@ static void CCExpandWithWarnings(NSDictionary<NSNumber *, CCProcess *> *snapshot
     NSSet *protected = CCProtectedWithWarnings(snapshot, warnings);
     for (NSNumber *pid in targets.allKeys) {
         CCProcess *previous = targets[pid], *current = snapshot[pid];
+        // Apply the current protection decision even when a later identity read
+        // fails and the prior record must be retained until coverage recovers.
+        previous.protectedFromTermination = CCIsProtected(protected, previous.pid);
         if (!current) {
             // A transient read failure must not erase a captured child. A second
             // identity read distinguishes an exit/reuse from incomplete coverage.
@@ -236,7 +314,7 @@ static void CCExpandWithWarnings(NSDictionary<NSNumber *, CCProcess *> *snapshot
         targets[pid] = current;
     }
     for (CCProcess *process in snapshot.allValues) {
-        NSString *reason = CCRootReason(process);
+        NSString *reason = CCRootReasonWithWarnings(process, warnings);
         if (reason) {
             process.reason = reason;
             process.protectedFromTermination = CCIsProtected(protected, process.pid);
@@ -249,7 +327,7 @@ static void CCExpandWithWarnings(NSDictionary<NSNumber *, CCProcess *> *snapshot
         for (CCProcess *process in snapshot.allValues) {
             CCProcess *parent = targets[@(process.parent)];
             if (!parent || parent.protectedFromTermination || !CCSame(parent, snapshot[@(parent.pid)]) ||
-                targets[@(process.pid)] || CCIsProtected(protected, process.pid)) continue;
+                !CCBornNotBefore(process, parent) || targets[@(process.pid)] || CCIsProtected(protected, process.pid)) continue;
             process.reason = @"Claude 子进程";
             process.protectedFromTermination = NO;
             targets[@(process.pid)] = process;
@@ -413,6 +491,7 @@ static void CCShowResult(NSDictionary *result, BOOL closed) {
         alert.messageText = count ? [NSString stringWithFormat:@"Claude 正在运行：%lu 个进程", (unsigned long)count] : @"未检测到 Claude 进程";
         alert.informativeText = count ? @"下方列出了 Claude 及其子进程。点击“一键关闭”会结束正在进行的 Claude 任务。" : @"本次检查未发现当前用户的可识别 Claude 桌面版或 Claude Code 进程。";
     }
+    if (!count) alert.informativeText = [alert.informativeText stringByAppendingString:@"\n\n范围仅限当前用户可识别的本地进程；不包括 Cowork 虚拟机、系统服务、网页或远程任务，不提供网络隔离。"];
     [alert addButtonWithTitle:@"知道了"];
     if ([result[@"closable_count"] unsignedIntegerValue]) [alert addButtonWithTitle:closed ? @"重试关闭" : @"一键关闭"];
     NSString *details = CCDetails(result);

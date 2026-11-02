@@ -16,6 +16,8 @@ for app_name in '一键关闭 Claude' '检查 Claude 进程'; do
         printf '请先运行 bash build.sh：%s\n' "$source_app" >&2
         exit 1
     fi
+    # Validate the complete source bundle before touching a working installation.
+    /usr/bin/codesign --verify --deep --strict "$source_app"
     if [ -e "$installed_app" ]; then
         source_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$source_app/Contents/Info.plist")
         installed_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$installed_app/Contents/Info.plist")

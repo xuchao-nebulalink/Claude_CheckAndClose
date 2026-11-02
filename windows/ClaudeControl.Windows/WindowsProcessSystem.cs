@@ -25,6 +25,7 @@ public sealed class WindowsProcessSystem : IProcessSystem
         var parents = new Dictionary<int, int>();
         var unreadable = new Dictionary<int, (string Name, int Error)>();
         var unjoined = new Dictionary<int, string>();
+        var uncertain = new HashSet<int>();
         using var searcher = new ManagementObjectSearcher(new ManagementScope(@"\\.\root\cimv2"),
             new ObjectQuery($"SELECT ProcessId, ParentProcessId, Name, CreationDate, CommandLine FROM Win32_Process WHERE SessionId = {CurrentSession}"),
             new System.Management.EnumerationOptions { ReturnImmediately = false, Timeout = TimeSpan.FromSeconds(10) });
@@ -70,6 +71,8 @@ public sealed class WindowsProcessSystem : IProcessSystem
                         warnings.Add($"PID {id}（{name}）无法读取脚本入口，无法完整检查该 Node/Bun 进程。");
                     else process = process with { Arguments = SplitArguments(commandLine) };
                 }
+                string? entryWarning = ProcessRules.RootWarning(process);
+                if (entryWarning is not null) warnings.Add(entryWarning);
                 processes[id] = process;
             }
         }
@@ -89,11 +92,14 @@ public sealed class WindowsProcessSystem : IProcessSystem
             if (current is not null && expected.SameIdentity(current))
                 processes[expected.Id] = current with { Arguments = expected.Arguments, Kind = expected.Kind };
             else if (current is null && error != 0 && error != 87 && error != 1168)
+            {
+                uncertain.Add(expected.Id);
                 warnings.Add($"已追踪的 PID {expected.Id} 无法复核身份或路径：{new Win32Exception(error).Message}。无法确认它已退出。");
+            }
         }
-        bool complete = ProcessRules.CanEstablishAncestors(processes, parents, CurrentId);
+        bool complete = ProcessRules.CanEstablishAncestors(processes, parents, CurrentId, uncertain);
         if (!complete) warnings.Add("本工具的活动祖先链无法完整核实；本次只检查，不执行关闭。请从桌面独立打开工具后重试。");
-        return new(processes, warnings, complete);
+        return new(processes, warnings, complete, uncertain);
     }
 
     private static bool IsRuntime(string name) => new[] { "node.exe", "node", "bun.exe", "bun" }.Contains(name, StringComparer.OrdinalIgnoreCase);

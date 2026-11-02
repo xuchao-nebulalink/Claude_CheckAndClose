@@ -2,6 +2,11 @@
 set -euo pipefail
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SOURCE_DIR/build"
+VERSION="$(tr -d '\r\n' < "$SOURCE_DIR/../VERSION")"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'VERSION 必须为三段数字版本号。\n' >&2
+    exit 1
+fi
 mkdir -p "$BUILD_DIR"
 /usr/bin/xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
     -Wno-unused-function -arch arm64 -arch x86_64 \
@@ -27,8 +32,8 @@ make_app() {
 <key>CFBundleDisplayName</key><string>$app_name</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>CFBundleVersion</key><string>$VERSION</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
