@@ -1,0 +1,59 @@
+# Windows 版
+
+支持 .NET 10 支持的 Windows 版本，提供 `win-x64`（常见 Intel/AMD 电脑）和 `win-arm64`（ARM Windows）自包含包。使用者无需安装 .NET；开发构建需要 .NET 10 SDK。
+
+解压整个压缩包，保留文件在同一目录：
+
+- 双击 **Close Claude.cmd**：直接关闭并复查。
+- 双击 **Check Claude.cmd**：仅检查。
+- 双击 **ClaudeControl.exe**：打开包含两个按钮的窗口。
+
+可右键这两个 `.cmd` 创建桌面快捷方式。关闭会中断 Claude 对话、Claude Code 和相关本地任务，请先保存工作。
+
+## 检查和关闭范围
+
+仅处理**当前 Windows 用户、当前登录会话**的本地进程。精确识别可执行文件名 `Claude.exe` / `claude.exe`、Claude 专属安装目录中的桌面辅助进程，以及 Node/Bun 实际运行的 `node_modules/@anthropic-ai/claude-code/cli.js` 入口；追踪快照中可确定归属的后代。不会根据整条命令行里的“Claude”文字模糊结束进程。
+
+先向已识别进程的主窗口发送正常关闭请求，再以经过身份复核的本机进程句柄终止残留。CLI 没有通用的安全退出协议，因此会直接结束；不会向共享终端发送 Ctrl+C。每次终止都复核 PID、进程创建时间、用户 SID 和登录会话；不会根据 PID 单独操作。WMI 的父进程和脚本入口也需与本机创建时间关联后才采用。父级终端、编辑器和本工具祖先进程受保护。如果从 Claude 的子终端打开工具，受保护的 Claude 祖先进程仍会显示，并提示从桌面独立打开；活动祖先身份无法核实时，本次禁止执行关闭。
+
+读取权限不足、脚本入口不可读、WMI 检查失败或结束失败都会显示未完成信息；不会以“零个已识别进程”掩盖读取失败。已脱离父级且无法追溯的孤立任务、其他会话/用户、WSL、远程任务、浏览器中的 Claude 网页不在范围内。启动器持续重启 Claude 时，最终复查会显示能检测到的残留。结束提权运行的 Claude 可能因权限不足失败，工具不会自动提权。
+
+## 网络与隐私
+
+应用本身仅使用本机进程、令牌和本地 WMI API；没有 HTTP 请求、遥测、自动更新，也不改代理、DNS、防火墙或 Claude 配置。命令行参数仅在内存中用于识别脚本，结果不输出参数或用户 SID。
+
+**工具没有联网功能，不等于网络隔离或防 IP 泄漏。** Claude 在运行、退出等待期间已有的连接仍可能通信；工具无法撤回之前已发送的数据，也不能阻止之后重新启动。若准备切换/关闭代理，先在代理仍启用时关闭 Claude，确认完成且没有警告后再操作。要严格阻断网络，需要独立的系统网络控制。
+
+## 构建与测试
+
+在 Windows PowerShell 或 PowerShell 7 中运行（脚本不更改系统执行策略）：
+
+```powershell
+./windows/test.ps1
+./windows/build.ps1 -Runtime win-x64
+# ARM Windows 包：
+./windows/build.ps1 -Runtime win-arm64
+```
+
+输出位于 `dist/ClaudeControl-windows-win-x64.zip` 等文件。首次构建由 .NET/NuGet 下载 Microsoft 框架与包；编译后的应用运行时不执行这些下载。脚本为其自身 .NET SDK 进程关闭 SDK 遥测。
+
+测试包含跨平台合成快照的匹配、误匹配、后代、祖先保护、PID 复用、失败报告；Windows 上另启动临时无害模拟程序验证 Win32/WMI、参数解析和定向终止。集成测试只结束自身创建的模拟子进程，不调用对真实系统的完整关闭流程。
+
+可在 macOS/Linux 运行纯逻辑部分：
+
+```sh
+DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet run --project windows/ClaudeControl.Tests -c Release
+```
+
+发布后的只读检查可把 JSON 写到指定本地文件，适合 WinExe 的自动化测试：
+
+```powershell
+$exe = './dist/ClaudeControl-windows-win-x64/ClaudeControl.exe'
+$result = Join-Path $env:TEMP 'claude-status.json'
+$process = Start-Process $exe -ArgumentList @('--status-json', ('"' + $result + '"')) -Wait -PassThru
+Get-Content $result
+```
+
+`scan_complete` 为 false 时不能视为确认关闭；退出码为 2。此命令只检查，不结束任何进程。
+
+原生 API 行为参考：[CloseMainWindow](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.closemainwindow?view=net-10.0)、[GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)、[TerminateProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess)、[CommandLineToArgvW](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-commandlinetoargvw)。
