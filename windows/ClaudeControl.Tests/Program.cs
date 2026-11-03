@@ -23,7 +23,12 @@ internal static class Tests
         try
         {
             Matching(); Identity(); Descendants(); Flow();
-            if (OperatingSystem.IsWindows()) NativeIntegration();
+            CoworkServiceTests.Run(Assert);
+            foreach (uint type in new uint[] { 0x10, 0x210 })
+                Assert(CoworkServiceSystem.IsSupportedServiceType(type), "accept independent ordinary/packaged Cowork service type " + type);
+            foreach (uint type in new uint[] { 0, 1, 2, 0x20, 0x110, 0x220, 0x410, 0x201 })
+                Assert(!CoworkServiceSystem.IsSupportedServiceType(type), "reject shared/driver/unknown service type " + type);
+            if (OperatingSystem.IsWindows()) { NativeIntegration(); NativeServiceReadOnly(); }
             else Console.WriteLine("Windows native integration skipped on this OS; run test.ps1 on Windows.");
             Console.WriteLine($"{checks} checks passed.");
             return 0;
@@ -152,6 +157,22 @@ internal static class Tests
         Assert(recovery.Killed.SequenceEqual([child.Id]), "full close flow retries only the captured child after transient read denial");
         Assert(recovery.ReceivedTrackedAfterFailure, "captured uncertain identity is supplied to the next native refresh");
         Assert(close.Remaining.Count == 0 && close.Warnings.Count > 0, "transient failure remains reported even after retry succeeds");
+
+        var detached = child with { ParentId = 1, Kind = "Claude 子进程" };
+        var detachedSystem = new FakeSystem(S(detached));
+        Assert(new Controller(detachedSystem).Check().Remaining.Count == 0, "fresh root scan cannot rediscover a detached arbitrary child");
+        check = new Controller(detachedSystem).Check([detached]);
+        Assert(check.Remaining.Count == 1 && check.Remaining[0].SameIdentity(detached) && detachedSystem.Killed.Count == 0,
+            "post-service read-only check retains a captured detached child without terminating it");
+        var replacedChild = new FakeSystem(S(detached with { Created = detached.Created + 1 }));
+        Assert(new Controller(replacedChild).Check([detached]).Remaining.Count == 0 && replacedChild.Killed.Count == 0,
+            "post-service check drops a reused child PID without treating replacement as a target");
+        var unreadableChild = new FakeSystem(new Snapshot(new Dictionary<int, ProcessRecord>(), ["child unreadable"], true, new HashSet<int> { detached.Id }));
+        check = new Controller(unreadableChild).Check([detached]);
+        Assert(check.Remaining.Count == 1 && !check.ConfirmedClosed, "post-service read failure preserves the captured child and prevents false zero");
+        var foreignTracked = new FakeSystem(S());
+        new Controller(foreignTracked).Check([detached with { OwnerSid = "other" }, root with { SessionId = 2 }]);
+        Assert(foreignTracked.CapturedTracked.Count == 0, "post-service tracking does not widen original user/session scope");
     }
 
     private static void NativeIntegration()
@@ -215,6 +236,32 @@ internal static class Tests
             finally { if (!ambiguousOwned.HasExited) { ambiguousOwned.Kill(); ambiguousOwned.WaitForExit(); } }
         }
         finally { Directory.Delete(directory, true); }
+    }
+
+    private static void NativeServiceReadOnly()
+    {
+        // All service tests here are read-only: never call StopVerified/Close on
+        // a Windows backend, and never install a fixture service on the host.
+        CoworkServiceResult service = new CoworkServiceController(new CoworkServiceSystem()).Check();
+        Assert(service.Warnings.Count == 0, "native read-only Cowork SCM query completes on the CI host");
+        Assert(service.Snapshot is null || service.Snapshot.Name == CoworkServiceController.ServiceName,
+            "native Cowork inspection cannot return an unrelated service");
+        string microsoft = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
+        Assert(File.Exists(microsoft), "native publisher rejection fixture is a system binary");
+        CoworkPublisherVerification other = CoworkServiceSystem.VerifyPublisherFile(microsoft);
+        Assert(!other.IsAnthropic, "native offline signature validation never accepts Microsoft as Anthropic");
+        Assert(!other.SignatureValid || other.CertificateFingerprint.Length == 64,
+            "a trusted native signer is extracted from the verified chain");
+        string unsigned = Path.Combine(Path.GetTempPath(), "claude-control-unsigned-" + Guid.NewGuid().ToString("N") + ".exe");
+        try
+        {
+            File.WriteAllBytes(unsigned, [0x4d, 0x5a, 0, 0]);
+            CoworkPublisherVerification invalid = CoworkServiceSystem.VerifyPublisherFile(unsigned);
+            Assert(!invalid.SignatureValid && !invalid.IsAnthropic, "unsigned native lookalike cannot pass publisher verification");
+        }
+        finally { if (File.Exists(unsigned)) File.Delete(unsigned); }
+        CoworkPublisherVerification missing = CoworkServiceSystem.VerifyPublisherFile(unsigned);
+        Assert(!missing.SignatureValid && !missing.IsAnthropic, "missing publisher file is rejected without any service action");
     }
 
     private sealed class FakeSystem(Snapshot snapshot) : IProcessSystem

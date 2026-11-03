@@ -186,9 +186,13 @@ public sealed class Controller(IProcessSystem system)
         return snapshot;
     }
 
-    public ControlResult Check()
+    public ControlResult Check(IReadOnlyCollection<ProcessRecord>? tracked = null)
     {
-        var targets = new Dictionary<int, ProcessRecord>();
+        // A service/UAC operation can outlive a captured process's parent.
+        // Carry those identities into the read-only refresh rather than losing
+        // still-running descendants that a fresh root scan cannot rediscover.
+        var targets = (tracked ?? []).Where(p => p.OwnerSid == system.CurrentSid &&
+            p.SessionId == system.CurrentSession).ToDictionary(p => p.Id);
         var snapshot = Refresh(targets);
         return new(targets.Count, targets.Values.OrderBy(p => p.Id).ToArray(), snapshot.Warnings);
     }

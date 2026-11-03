@@ -9,6 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="../ClaudeControl.Core/ClaudeControl.Core.csproj" />
     <Compile Include="../ClaudeControl.Windows/WindowsProcessSystem.cs" Link="WindowsProcessSystem.cs" />
+    <Compile Include="../ClaudeControl.Windows/CoworkServiceSystem.cs" Link="CoworkServiceSystem.cs" />
     <PackageReference Include="System.Management" Version="10.0.0" />
   </ItemGroup>
 </Project>

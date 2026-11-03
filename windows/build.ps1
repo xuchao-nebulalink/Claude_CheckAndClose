@@ -25,10 +25,13 @@ if ($isNativeWindows) {
         if ($process.ExitCode -ne 0) { throw "Read-only published-app smoke failed (exit $($process.ExitCode))." }
         if (-not (Test-Path $json)) { throw 'Published app did not create its status JSON.' }
         $status = Get-Content $json -Raw | ConvertFrom-Json
-        if ($status.scan_complete -ne $true -or $null -eq $status.remaining_count -or $null -eq $status.processes) {
+        if ($status.scan_complete -ne $true -or $null -eq $status.remaining_count -or $null -eq $status.processes -or
+            $null -eq $status.cowork_service -or $null -eq $status.cowork_service.installed -or
+            $null -eq $status.cowork_service.confirmed_stopped -or $null -eq $status.confirmed_closed -or
+            $status.network_isolation -ne $false) {
             throw 'Published-app status JSON is incomplete.'
         }
-        Write-Host "Published-app read-only smoke passed ($($status.remaining_count) detected processes)."
+        Write-Host "Published-app read-only smoke passed ($($status.remaining_count) detected processes, Cowork service installed: $($status.cowork_service.installed))."
     } finally {
         if (Test-Path $json) { Remove-Item $json }
     }
