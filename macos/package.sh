@@ -6,20 +6,18 @@ STAGING_DIR="$SOURCE_DIR/build/package/ClaudeControl-macOS"
 DIST_DIR="$ROOT_DIR/dist"
 if [ -d "$STAGING_DIR" ]; then rm -rf "$STAGING_DIR"; fi
 mkdir -p "$STAGING_DIR" "$DIST_DIR"
-for app_name in '一键关闭 Claude' '检查 Claude 进程'; do
-    /usr/bin/codesign --verify --deep --strict "$SOURCE_DIR/build/$app_name.app"
-    /usr/bin/ditto "$SOURCE_DIR/build/$app_name.app" "$STAGING_DIR/$app_name.app"
-done
+APP_NAME='Claude 一键工具'
+/usr/bin/codesign --verify --deep --strict "$SOURCE_DIR/build/$APP_NAME.app"
+/usr/bin/ditto "$SOURCE_DIR/build/$APP_NAME.app" "$STAGING_DIR/$APP_NAME.app"
 cp "$SOURCE_DIR/install.sh" "$STAGING_DIR/安装桌面按钮.command"
 chmod +x "$STAGING_DIR/安装桌面按钮.command"
 cp "$ROOT_DIR/docs/PRIVACY.md" "$STAGING_DIR/PRIVACY.md"
 cat > "$STAGING_DIR/使用说明.txt" <<'INFO'
 Claude Check & Close — macOS 12+（Apple Silicon / Intel）
 
-双击“一键关闭 Claude.app”：关闭后复查并显示结果。
-双击“检查 Claude 进程.app”：只检查，有进程时可从结果中关闭。
-双击“安装桌面按钮.command”：复制应用并创建两个桌面入口。
-也可以把两个 .app 拖到 Dock。
+双击“Claude 一键工具.app”：自动检查并列出进程；需要关闭时点“一键关闭”，关闭后复查并显示结果。
+双击“安装桌面按钮.command”：复制应用并创建桌面入口；旧版安装的两个应用和桌面入口会被替换。
+也可以把 .app 拖到 Dock；旧版留在 Dock 的图标需手动移除。
 
 关闭会中断正在执行的 Claude 任务，请先保存工作。
 如有残留、受保护进程或检查不完整提示，应先处理，不能认为已全部关闭。

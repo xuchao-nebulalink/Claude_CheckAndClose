@@ -9,7 +9,5 @@ for architecture in arm64 x86_64; do
     esac
 done
 printf 'Universal 架构验证通过：%s\n' "$ARCHITECTURES"
-for app_name in '一键关闭 Claude' '检查 Claude 进程'; do
-    /usr/bin/codesign --verify --deep --strict "$SOURCE_DIR/build/$app_name.app"
-done
+/usr/bin/codesign --verify --deep --strict "$SOURCE_DIR/build/Claude 一键工具.app"
 "$SOURCE_DIR/build/ClaudeControl" --status

@@ -63,7 +63,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         if (args.Length > 1 || (args.Length == 1 && args[0] is not "--close" and not "--check"))
         {
-            MessageBox.Show("请使用桌面的关闭/检查入口，或直接打开本程序。", "Claude 一键工具");
+            MessageBox.Show("无法识别的参数。请直接打开本程序，或使用 --close / --check。", "Claude 一键工具");
             return 1;
         }
         Application.Run(new MainForm(args.FirstOrDefault()));
@@ -73,9 +73,9 @@ internal static class Program
 
 internal sealed class MainForm : Form
 {
-    private readonly Label status = new() { AutoSize = false, Height = 60, Text = "选择一键关闭，或检查进程和 Cowork 服务。", Dock = DockStyle.Top, Padding = new(0, 8, 0, 10) };
-    private readonly Button close = new() { Text = "一键关闭 Claude", AutoSize = true, Padding = new(12, 7, 12, 7) };
-    private readonly Button check = new() { Text = "检查 Claude 进程", AutoSize = true, Padding = new(12, 7, 12, 7) };
+    private readonly Label status = new() { AutoSize = false, Height = 60, Dock = DockStyle.Top, Padding = new(0, 8, 0, 10) };
+    private readonly Button close = new() { Text = "一键关闭 Claude", AutoSize = true, Padding = new(12, 7, 12, 7), Enabled = false };
+    private readonly Button check = new() { Text = "重新检查", AutoSize = true, Padding = new(12, 7, 12, 7), Enabled = false };
     private readonly TextBox details = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
     private readonly ProgressBar progress = new() { Style = ProgressBarStyle.Marquee, Height = 12, Dock = DockStyle.Bottom, Visible = false };
 
@@ -98,7 +98,8 @@ internal sealed class MainForm : Form
         Controls.Add(progress);
         close.Click += async (_, _) => await Run(true);
         check.Click += async (_, _) => await Run(false);
-        Shown += async (_, _) => { if (mode is not null) await Run(mode == "--close"); };
+        // Opening only checks. Closing interrupts work, so it needs the button or an explicit option.
+        Shown += async (_, _) => await Run(mode == "--close");
     }
 
     private async Task Run(bool closing)
@@ -110,8 +111,11 @@ internal sealed class MainForm : Form
         try
         {
             DesktopResult result = closing ? await WindowsOperations.CloseAsync() : await Task.Run(WindowsOperations.Check);
+            // Only a complete zero removes the action: a read failure, or a service
+            // that needs elevation to verify, is not proof that nothing can be closed.
+            close.Visible = !result.ConfirmedClosed;
             status.Text = result.Warnings.Count > 0 ? "未能完整确认，请查看下方详情。" :
-                result.Processes.Remaining.Count > 0 ? $"仍有 {result.Processes.Remaining.Count} 个用户进程；Cowork 服务状态见下方。" :
+                result.Processes.Remaining.Count > 0 ? $"{(closing ? "仍有" : "发现")} {result.Processes.Remaining.Count} 个用户进程；Cowork 服务状态见下方。" :
                 !result.Service.ConfirmedStopped ? "用户进程为零，Cowork 服务尚未确认停止。" :
                 "用户进程为零；Cowork 服务已停止或未安装。";
             var text = new StringBuilder();
@@ -129,10 +133,16 @@ internal sealed class MainForm : Form
         }
         catch (Exception exception)
         {
+            close.Visible = true;
             status.Text = "无法完成检查，不能确认 Claude 是否已关闭。";
             details.Text = exception.Message;
         }
-        finally { close.Enabled = check.Enabled = true; progress.Visible = false; }
+        finally
+        {
+            close.Text = closing ? "重试关闭" : "一键关闭 Claude";
+            close.Enabled = check.Enabled = true;
+            progress.Visible = false;
+        }
     }
 
     private static string ServiceState(CoworkServiceState state) => state switch

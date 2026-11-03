@@ -2,7 +2,7 @@
 
 本地检查与一键关闭 Claude 的小工具，支持 macOS 和 Windows。
 
-两个入口：**一键关闭 Claude** 和 **检查 Claude 进程**。关闭后会再次检查并显示残留、受保护进程或读取失败。关闭会中断 Claude 正在进行的对话、Claude Code 和本地子任务，使用前请保存工作。
+只有一个应用：打开后自动检查并列出进程，需要关闭时点 **一键关闭**。关闭后会再次检查并显示残留、受保护进程或读取失败。关闭会中断 Claude 正在进行的对话、Claude Code 和本地子任务，使用前请保存工作。
 
 ## 下载与使用
 
@@ -10,11 +10,13 @@
 
 | 系统 | 下载包 | 使用方式 |
 | --- | --- | --- |
-| macOS 12 及以上，Apple Silicon / Intel | `ClaudeControl-macOS-universal.zip` | 双击两个 `.app`；可运行 `安装桌面按钮.command` 创建桌面入口，也可拖到 Dock |
-| Windows x64 | `ClaudeControl-windows-win-x64.zip` | 双击 `Close Claude.cmd` 或 `Check Claude.cmd` |
-| Windows ARM64 | `ClaudeControl-windows-win-arm64.zip` | 使用对应 ARM64 包中的相同入口 |
+| macOS 12 及以上，Apple Silicon / Intel | `ClaudeControl-macOS-universal.zip` | 双击 `Claude 一键工具.app`；可运行 `安装桌面按钮.command` 创建桌面入口，也可拖到 Dock |
+| Windows x64 | `ClaudeControl-windows-win-x64.zip` | 双击 `ClaudeControl.exe` |
+| Windows ARM64 | `ClaudeControl-windows-win-arm64.zip` | 双击 `ClaudeControl.exe` |
 
-Windows 发布包包含 .NET 运行时，无需另装 .NET。请保留解压后的文件夹，两个入口依赖旁边的程序文件。Windows 版会另外检查 Cowork 后台服务；关闭需要额外权限时会弹出 Windows 管理员授权提示，仅对经过身份核验的服务执行停止操作。
+从旧版升级时，macOS 运行 `安装桌面按钮.command` 会替换旧版安装的两个应用和桌面入口，留在 Dock 的旧图标需手动移除。Windows 请解压到新文件夹，并删除旧文件夹和指向旧 `.cmd` 的快捷方式：旧版的 `Close Claude.cmd` 仍会不经确认直接关闭。
+
+Windows 发布包包含 .NET 运行时，无需另装 .NET。Windows 版会另外检查 Cowork 后台服务；关闭需要额外权限时会弹出 Windows 管理员授权提示，仅对经过身份核验的服务执行停止操作。
 
 macOS 应用采用本地临时签名，Windows 应用未购买代码签名证书。下载后系统可能提示无法验证开发者；没有配置 Apple 公证或商业签名。可以在自己的电脑从源码构建，不需要关闭系统安全保护。
 
@@ -52,6 +54,8 @@ bash macos/install.sh
 ```bash
 ./macos/build/ClaudeControl --status
 ```
+
+不带参数运行时打开检查窗口；只有明确传入 `--close` 才会不经确认直接关闭；无法识别的参数会报错退出，不执行任何动作。
 
 Windows 需要 .NET 10 SDK 和 PowerShell，构建与打包命令见 [Windows 说明](windows/README.md)。发布包本身无需 SDK。
 

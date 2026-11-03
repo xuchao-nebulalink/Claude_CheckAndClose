@@ -482,14 +482,16 @@ static void CCShowResult(NSDictionary *result, BOOL closed) {
         alert.informativeText = [NSString stringWithFormat:@"已识别 %lu 个 Claude 进程；部分信息读取或关闭失败，不能据此确认已全部关闭。请查看详情。", (unsigned long)count];
     } else if (protectedCount) {
         alert.messageText = @"Claude 仍有受保护进程运行";
-        alert.informativeText = [NSString stringWithFormat:@"发现 %lu 个进程，其中 %lu 个是启动本工具的祖先进程。为保护当前终端，未结束这些进程，也未沿它们扩展子任务。请从 Finder 独立启动关闭工具。", (unsigned long)count, (unsigned long)protectedCount];
+        alert.informativeText = [NSString stringWithFormat:@"发现 %lu 个进程，其中 %lu 个是启动本工具的祖先进程。为保护当前终端，未结束这些进程，也未沿它们扩展子任务。请从 Finder 独立打开本工具。", (unsigned long)count, (unsigned long)protectedCount];
+        NSUInteger closable = [result[@"closable_count"] unsignedIntegerValue];
+        if (closable) alert.informativeText = [alert.informativeText stringByAppendingFormat:@"\n\n如果现在点击“%@”，只会结束其余 %lu 个进程，受保护的进程会继续运行。", closed ? @"重试关闭" : @"一键关闭", (unsigned long)closable];
     } else if (closed) {
         alert.messageText = count ? @"Claude 仍有进程运行" : @"Claude 已关闭";
         alert.informativeText = count ? [NSString stringWithFormat:@"复查发现 %lu 个进程。可重试关闭，或查看下方详情。", (unsigned long)count] :
             ([result[@"initial_count"] unsignedIntegerValue] ? @"关闭完成，复查未检测到 Claude 进程。" : @"当前未检测到 Claude 进程，无需关闭。");
     } else {
         alert.messageText = count ? [NSString stringWithFormat:@"Claude 正在运行：%lu 个进程", (unsigned long)count] : @"未检测到 Claude 进程";
-        alert.informativeText = count ? @"下方列出了 Claude 及其子进程。点击“一键关闭”会结束正在进行的 Claude 任务。" : @"本次检查未发现当前用户的可识别 Claude 桌面版或 Claude Code 进程。";
+        alert.informativeText = count ? @"下方列出了 Claude 及其子进程。点击“一键关闭”会结束正在进行的 Claude 任务，请先保存工作。" : @"本次检查未发现当前用户的可识别 Claude 桌面版或 Claude Code 进程。";
     }
     if (!count) alert.informativeText = [alert.informativeText stringByAppendingString:@"\n\n范围仅限当前用户可识别的本地进程；不包括 Cowork 虚拟机、系统服务、网页或远程任务，不提供网络隔离。"];
     [alert addButtonWithTitle:@"知道了"];
@@ -562,11 +564,33 @@ static void CCShowResult(NSDictionary *result, BOOL closed) {
 }
 @end
 
+typedef NS_ENUM(NSInteger, CCMode) { CCModeCheck, CCModeClose, CCModeStatus, CCModeInvalid };
+
+// Closing interrupts work, so it must be requested explicitly. A mistyped option
+// must stop here instead of falling through to any action.
+static CCMode CCModeFromArguments(NSArray<NSString *> *arguments) {
+    NSString *option = nil;
+    for (NSUInteger i = 1; i < arguments.count; i++) {
+        // LaunchServices can add a process serial number when first opening a downloaded app.
+        if ([arguments[i] hasPrefix:@"-psn_"]) continue;
+        if (option) return CCModeInvalid;
+        option = arguments[i];
+    }
+    if (!option) return CCModeCheck;
+    if ([option isEqualToString:@"--close"]) return CCModeClose;
+    if ([option isEqualToString:@"--status"]) return CCModeStatus;
+    return CCModeInvalid;
+}
+
 #ifndef CC_TESTING
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        NSArray *arguments = NSProcessInfo.processInfo.arguments;
-        if ([arguments containsObject:@"--status"]) {
+        CCMode mode = CCModeFromArguments(NSProcessInfo.processInfo.arguments);
+        if (mode == CCModeInvalid) {
+            fprintf(stderr, "无法识别的参数。用法：ClaudeControl [--close | --status]\n");
+            return 64;
+        }
+        if (mode == CCModeStatus) {
             @try {
                 NSDictionary *result = CCCheck();
                 NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil];
@@ -577,7 +601,7 @@ int main(int argc, const char *argv[]) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         CCDelegate *delegate = [CCDelegate new];
-        delegate.close = ![NSBundle.mainBundle.bundleIdentifier hasSuffix:@".status"];
+        delegate.close = mode == CCModeClose;
         NSApp.delegate = delegate;
         [NSApp run];
     }

@@ -500,8 +500,23 @@ static void TestOwnedProcess(void) {
     [NSFileManager.defaultManager removeItemAtPath:root error:NULL];
 }
 
+static void TestEntryModes(void) {
+    NSString *tool = @"ClaudeControl";
+    T(CCModeFromArguments(@[tool]) == CCModeCheck, @"Opening without options only checks");
+    T(CCModeFromArguments(@[tool, @"-psn_0_12345"]) == CCModeCheck, @"A Finder process serial number still only checks");
+    T(CCModeFromArguments(@[tool, @"--close"]) == CCModeClose, @"Closing requires the explicit option");
+    T(CCModeFromArguments(@[tool, @"-psn_0_12345", @"--close"]) == CCModeClose, @"A process serial number does not hide an explicit close");
+    T(CCModeFromArguments(@[tool, @"--status"]) == CCModeStatus, @"Status option selects read-only JSON");
+    for (NSArray *arguments in @[@[tool, @"--stats"], @[tool, @"--Close"], @[tool, @"close"], @[tool, @""],
+                                 @[tool, @"--close", @"--status"], @[tool, @"--status", @"--close"], @[tool, @"--close", @"--close"]]) {
+        T(CCModeFromArguments(arguments) == CCModeInvalid,
+          [@"Unknown or conflicting options select no action: " stringByAppendingString:arguments.description]);
+    }
+}
+
 int main(void) {
     @autoreleasepool {
+        TestEntryModes();
         TestMatching();
         TestScriptSymlinks();
         TestIdentity();

@@ -10,8 +10,6 @@ dotnet publish (Join-Path $PSScriptRoot 'ClaudeControl.Windows/ClaudeControl.Win
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:EnableCompressionInSingleFile=true -p:DebugType=None
 if ($LASTEXITCODE -ne 0) { throw 'Windows publish failed.' }
-Copy-Item (Join-Path $PSScriptRoot 'Close Claude.cmd') $output -Force
-Copy-Item (Join-Path $PSScriptRoot 'Check Claude.cmd') $output -Force
 Copy-Item (Join-Path $PSScriptRoot 'README.md') $output -Force
 $licenseOutput = Join-Path $output 'licenses'
 New-Item -ItemType Directory -Force $licenseOutput | Out-Null

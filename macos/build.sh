@@ -15,21 +15,20 @@ mkdir -p "$BUILD_DIR"
 /usr/bin/xcrun clang -fobjc-arc -O2 -framework AppKit -framework Foundation \
     "$SOURCE_DIR/IconMaker.m" -o "$BUILD_DIR/IconMaker"
 
-make_app() {
-    local app_name="$1" identifier="$2" action="$3"
-    local app_dir="$BUILD_DIR/$app_name.app"
-    mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
-    cp "$BUILD_DIR/ClaudeControl" "$app_dir/Contents/MacOS/ClaudeControl"
-    "$BUILD_DIR/IconMaker" "$BUILD_DIR/$action.iconset" "$action"
-    /usr/bin/iconutil -c icns "$BUILD_DIR/$action.iconset" -o "$app_dir/Contents/Resources/AppIcon.icns"
-    cat > "$app_dir/Contents/Info.plist" <<PLIST
+APP_NAME='Claude 一键工具'
+APP_DIR="$BUILD_DIR/$APP_NAME.app"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+cp "$BUILD_DIR/ClaudeControl" "$APP_DIR/Contents/MacOS/ClaudeControl"
+"$BUILD_DIR/IconMaker" "$BUILD_DIR/AppIcon.iconset"
+/usr/bin/iconutil -c icns "$BUILD_DIR/AppIcon.iconset" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>ClaudeControl</string>
-<key>CFBundleIdentifier</key><string>$identifier</string>
-<key>CFBundleName</key><string>$app_name</string>
-<key>CFBundleDisplayName</key><string>$app_name</string>
+<key>CFBundleIdentifier</key><string>local.xuchao.claudecontrol</string>
+<key>CFBundleName</key><string>$APP_NAME</string>
+<key>CFBundleDisplayName</key><string>$APP_NAME</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>$VERSION</string>
@@ -40,9 +39,5 @@ make_app() {
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-    /usr/bin/codesign --force --sign - "$app_dir"
-}
-
-make_app '一键关闭 Claude' 'local.xuchao.claudecontrol.close' 'close'
-make_app '检查 Claude 进程' 'local.xuchao.claudecontrol.status' 'status'
-printf '已构建：%s\n' "$BUILD_DIR"
+/usr/bin/codesign --force --sign - "$APP_DIR"
+printf '已构建：%s\n' "$APP_DIR"

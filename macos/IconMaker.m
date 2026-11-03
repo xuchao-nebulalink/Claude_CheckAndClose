@@ -2,9 +2,8 @@
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc != 3) return 1;
+        if (argc != 2) return 1;
         NSString *folder = @(argv[1]);
-        BOOL closing = strcmp(argv[2], "close") == 0;
         [[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
         for (NSNumber *sizeValue in @[@16, @32, @128, @256, @512]) {
             for (int scale = 1; scale <= 2; scale++) {
@@ -15,10 +14,9 @@ int main(int argc, const char *argv[]) {
                 NSAffineTransform *transform = [NSAffineTransform transform];
                 [transform scaleBy:pixels / 1024.0];
                 [transform concat];
-                NSColor *color = closing ? [NSColor colorWithCalibratedRed:0.75 green:0.34 blue:0.24 alpha:1] : [NSColor colorWithCalibratedRed:0.17 green:0.43 blue:0.38 alpha:1];
-                [color setFill];
+                [[NSColor colorWithCalibratedRed:0.75 green:0.34 blue:0.24 alpha:1] setFill];
                 [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(52, 52, 920, 920) xRadius:210 yRadius:210] fill];
-                NSImage *symbol = [NSImage imageWithSystemSymbolName:closing ? @"power" : @"magnifyingglass" accessibilityDescription:nil];
+                NSImage *symbol = [NSImage imageWithSystemSymbolName:@"power" accessibilityDescription:nil];
                 NSImage *tinted = [NSImage imageWithSize:NSMakeSize(520, 520) flipped:NO drawingHandler:^BOOL(NSRect rect) {
                     [symbol drawInRect:rect];
                     [[NSColor whiteColor] setFill];
